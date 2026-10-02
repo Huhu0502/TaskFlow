@@ -11,6 +11,8 @@ target/
 # 其它常见忽略
 *.log
 
- docs/03-业务流程.md
- docs/04-重难点.md
- docs/05-状态机与表结构.md
+docs/03-业务流程.md
+docs/04-重难点.md
+docs/05-状态机与表结构.md
+docs/06-扩展与优先级设计.md
+docs/07-接口文档.md
