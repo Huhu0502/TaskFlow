@@ -1,22 +1,31 @@
 package com.taskflow.center.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.taskflow.center.convert.TaskConverter;
+import com.taskflow.center.dto.TaskPageQuery;
 import com.taskflow.center.dto.TaskSubmitRequest;
-import com.taskflow.center.dto.TaskSubmitResponse;
+import com.taskflow.center.vo.TaskListItemVO;
+import com.taskflow.center.vo.TaskSubmitResponse;
 import com.taskflow.center.entity.Task;
 import com.taskflow.center.mapper.TaskMapper;
 import com.taskflow.center.service.TaskService;
+import com.taskflow.center.vo.TaskDetailVO;
 import com.taskflow.common.enums.ResultCode;
 import com.taskflow.common.enums.TaskStatus;
 import com.taskflow.common.enums.TaskType;
 import com.taskflow.common.exception.BizException;
+import com.taskflow.common.result.PageResult;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
+import org.springframework.util.StringUtils;
 
+import java.util.List;
 import java.util.Map;
 
 @Service
@@ -25,8 +34,11 @@ public class TaskServiceImpl extends ServiceImpl<TaskMapper, Task> implements Ta
 
     private final ObjectMapper objectMapper;
 
-    public TaskServiceImpl(ObjectMapper objectMapper) {
+    private final TaskConverter taskConverter;
+
+    public TaskServiceImpl(ObjectMapper objectMapper, TaskConverter taskConverter) {
         this.objectMapper = objectMapper;
+        this.taskConverter = taskConverter;
     }
 
     @Override
@@ -44,13 +56,14 @@ public class TaskServiceImpl extends ServiceImpl<TaskMapper, Task> implements Ta
         //组装
         String paramsJson = map2Json(request.getParams());
         Task task = new Task();
-        task.setBatchId(task.getBatchId());
+        task.setBatchId(request.getBatchId());
         task.setRequestId(request.getRequestId());
         task.setTaskType(request.getTaskType());
         task.setParams(paramsJson);
         task.setStatus(TaskStatus.CREATED.getCode());
         task.setPriority(request.getPriority()==null ? 0 : request.getPriority());
-        task.setRetryCount(request.getMaxRetry()==null ? 0 : request.getMaxRetry());
+        task.setMaxRetry(request.getMaxRetry()==null ? 0 : request.getMaxRetry());
+        task.setRetryCount(0);
 
         //插入
         try {
@@ -62,6 +75,38 @@ public class TaskServiceImpl extends ServiceImpl<TaskMapper, Task> implements Ta
         }
         log.info("任务创建成功, taskId={}, requestId={}", task.getId(), task.getRequestId());
         return new TaskSubmitResponse(task.getId(), task.getStatus(), false);
+    }
+
+    @Override
+    public TaskDetailVO getDetail(Long id) {
+        Task task = this.getById(id);
+        if(task == null) {
+            log.warn("任务不存在，taskId={}", id);
+            throw new BizException(ResultCode.TASK_NOT_FOUND);
+        }
+        log.info("查询成功, taskId={}", id);
+        return taskConverter.toDetailVO(task);
+    }
+
+    @Override
+    public PageResult<TaskListItemVO> queryPage(TaskPageQuery query) {
+        //防止校验绕过和pageSize拖库
+        if(query.getPageSize() != null && query.getPageSize() > 100 ) {
+            log.warn("pageQuery pageSize={}过大, 已调整至默认值", query.getPageSize());
+            query.setPageSize(100L);
+        }
+        Page<Task> mPage = new Page<>(query.getPageNo(), query.getPageSize());
+        LambdaQueryWrapper<Task> queryWrapper = new LambdaQueryWrapper<Task>()
+                .eq(query.getStatus() != null, Task::getStatus, query.getStatus())
+                .eq(StringUtils.hasText(query.getTaskType()), Task::getTaskType, query.getTaskType())
+                .ge(query.getStartTime() != null, Task::getCreateTime, query.getStartTime())
+                .le(query.getEndTime() != null, Task::getCreateTime, query.getEndTime())
+                .orderByDesc(Task::getCreateTime);
+        Page<Task> taskPage = this.page(mPage, queryWrapper);
+        List<TaskListItemVO> list = taskPage.getRecords().stream()
+                .map(taskConverter::toListItemVO)
+                .toList();
+        return PageResult.of(query.getPageNo(), query.getPageSize(), taskPage.getTotal(), list);
     }
 
     private String map2Json(Map<String, Object> params) {
@@ -79,4 +124,6 @@ public class TaskServiceImpl extends ServiceImpl<TaskMapper, Task> implements Ta
         //走唯一索引
         return this.getOne(new LambdaQueryWrapper<Task>().eq(Task::getRequestId, requestId));
     }
+
+
 }

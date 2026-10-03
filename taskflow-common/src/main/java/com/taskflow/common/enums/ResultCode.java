@@ -9,6 +9,7 @@ public enum ResultCode {
     PARAM_ERROR(40001, "参数校验失败"),
     TASK_TYPE_NOT_FOUND(40002, "任务类型不存在"),
     IDEMPOTENT_CONFLICT(40003, "幂等键冲突"),
+    TASK_NOT_FOUND(40401, "任务不存在"),
     SYSTEM_ERROR(50000, "系统内部错误");
 
     private Integer code;
