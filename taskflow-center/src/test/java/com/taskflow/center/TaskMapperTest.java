@@ -1,7 +1,7 @@
 package com.taskflow.center;
 
-import com.taskflow.center.entity.Task;
-import com.taskflow.center.mapper.TaskMapper;
+import com.taskflow.dao.entity.Task;
+import com.taskflow.dao.mapper.TaskMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;

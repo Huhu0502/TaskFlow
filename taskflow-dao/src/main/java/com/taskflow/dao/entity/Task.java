@@ -1,4 +1,4 @@
-package com.taskflow.center.entity;
+package com.taskflow.dao.entity;
 
 import com.baomidou.mybatisplus.annotation.*;
 import lombok.AllArgsConstructor;

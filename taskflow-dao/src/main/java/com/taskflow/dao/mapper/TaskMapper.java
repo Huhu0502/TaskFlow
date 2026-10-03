@@ -1,7 +1,7 @@
-package com.taskflow.center.mapper;
+package com.taskflow.dao.mapper;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
-import com.taskflow.center.entity.Task;
+import com.taskflow.dao.entity.Task;
 
 public interface TaskMapper extends BaseMapper<Task> {
 }

@@ -3,7 +3,7 @@ package com.taskflow.center.convert;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.taskflow.center.entity.Task;
+import com.taskflow.dao.entity.Task;
 import com.taskflow.center.vo.TaskDetailVO;
 import com.taskflow.center.vo.TaskListItemVO;
 import org.mapstruct.Mapper;
