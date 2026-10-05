@@ -5,12 +5,15 @@
 # 用法：  bash scripts/smoke-test.sh
 # 产物：  taskflow-center/target/smoke-test.log （target/ 已被 .gitignore 忽略）
 #
-# 验证内容：
-#   1) 提交 VIP 任务（priority=10）→ 引擎日志应显示已入队且 priority=10
-#   2) 提交 NORMAL 任务（priority=1）
-#   3) 幂等：重复提交同一 requestId → 返回同一 taskId 且 duplicated=true
-#   4) 全链路：入口桶 → 搬运工 → transcribeQueue → 转写 → 质检入口桶 → 搬运工 → qcQueue → 质检
-#   5) DB 状态（第 2 组阶段应为 QUEUED；接入真实 handler 后应为终态）
+# 覆盖链路：
+#   1) VIP 任务        smoke-vip-001     priority=10  → SUCCESS
+#   2) NORMAL 任务     smoke-nor-001     priority=1   → SUCCESS
+#   3) 幂等            重复提交同一 requestId → 同一 taskId 且 duplicated=true
+#   4) 慢任务          slow-001          转写3s/质检2s → 用于观测中间状态链
+#   5) 转写失败        fail-001                         → FAILED
+#   6) 质检失败        qcfail-001                       → FAILED
+#
+# 状态码：0 CREATED 1 QUEUED 2 TRANSCRIBING 3 TRANSCRIBED 4 QC_ING 5 SUCCESS 6 FAILED
 # ============================================================
 set -u
 
@@ -20,10 +23,7 @@ JAR="$CENTER_DIR/target/taskflow-center-1.0.0-SNAPSHOT.jar"
 LOG="$CENTER_DIR/target/smoke-test.log"
 
 API=http://localhost:8081/api/task
-REQ_VIP="smoke-vip-001"
-REQ_NOR="smoke-nor-001"
-
-MYSQL_BIN="/c/Program Files/MySQL/MySQL Server 8.0/bin"
+MYSQL_BIN="/c/Program Files/MySQL/MySQL Server 8.0/bin/mysql"
 DB_USER=root
 DB_PASS=jinjian20010210
 DB_NAME=taskflow
@@ -34,7 +34,28 @@ if [ ! -f "$JAR" ]; then
   exit 1
 fi
 
-# ---------- 停掉占用 8081 的进程 ----------
+mysql_q() {
+  "$MYSQL_BIN" -N -B --default-character-set=utf8mb4 \
+    -u"$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -e "$1" 2>/dev/null
+}
+
+status_name() {
+  case "$1" in
+    0) echo CREATED;; 1) echo QUEUED;; 2) echo TRANSCRIBING;; 3) echo TRANSCRIBED;;
+    4) echo QC_ING;; 5) echo SUCCESS;; 6) echo FAILED;; 7) echo TIMEOUT;; 8) echo CANCELED;;
+    *) echo UNKNOWN;;
+  esac
+}
+
+submit() {   # $1=requestId  $2=priority
+  curl -s -X POST "$API/submit" -H "Content-Type: application/json" \
+    -d "{\"requestId\":\"$1\",\"taskType\":\"MOCK_TASK\",\"priority\":$2,\"params\":{\"msg\":\"$1\"}}"
+}
+
+extract_id() {  # 从提交响应里取 taskId
+  sed -n 's/.*"taskId":"\([0-9]*\)".*/\1/p'
+}
+
 stop_app() {
   local pid
   pid=$(netstat -ano 2>/dev/null | grep ":8081" | grep -i listen | awk '{print $NF}' | head -1)
@@ -46,18 +67,13 @@ stop_app() {
 
 echo "=== 清理旧数据 & 端口 ==="
 stop_app
-if [ -x "$MYSQL_BIN/mysql" ]; then
-  "$MYSQL_BIN/mysql" --default-character-set=utf8mb4 -u"$DB_USER" -p"$DB_PASS" -D "$DB_NAME" \
-    -e "DELETE FROM task WHERE request_id LIKE 'smoke-%';" 2>/dev/null
-fi
+mysql_q "DELETE FROM task WHERE request_id LIKE 'smoke-%' OR request_id LIKE 'slow-%' OR request_id LIKE 'fail-%' OR request_id LIKE 'qcfail-%';"
 
-# ---------- 启动应用 ----------
 echo "=== 启动应用 ==="
 rm -f "$LOG"
-cd "$CENTER_DIR"
-java -jar "$JAR" > "$LOG" 2>&1 &
-APP_PID=$!
-
+cd "$CENTER_DIR" || exit 1
+# 打开 engine.local.stage 的 DEBUG，以便记录【状态流转】审计日志（QUEUED/TRANSCRIBED 是毫秒级交接态，只能从日志看）
+java -jar "$JAR" --logging.level.com.taskflow.engine.local.stage=DEBUG > "$LOG" 2>&1 &
 for _ in $(seq 1 40); do
   grep -q "Started TaskFlowCenterApplication" "$LOG" 2>/dev/null && break
   sleep 1
@@ -70,42 +86,61 @@ if ! grep -q "Started TaskFlowCenterApplication" "$LOG" 2>/dev/null; then
 fi
 echo "✅ 应用已启动"
 
-# ---------- 接口调用 ----------
+# ---------------- 提交 ----------------
 echo ""
-echo "========== 1) 提交 VIP 任务 (priority=10) =========="
-curl -s -X POST "$API/submit" -H "Content-Type: application/json" \
-  -d "{\"requestId\":\"$REQ_VIP\",\"taskType\":\"MOCK_TASK\",\"priority\":10,\"params\":{\"msg\":\"vip\"}}"
-echo ""
+echo "========== 1) VIP 任务 (priority=10) =========="
+RESP=$(submit smoke-vip-001 10); echo "$RESP"; VIP_ID=$(echo "$RESP" | extract_id)
 
-echo "========== 2) 提交 NORMAL 任务 (priority=1) =========="
-curl -s -X POST "$API/submit" -H "Content-Type: application/json" \
-  -d "{\"requestId\":\"$REQ_NOR\",\"taskType\":\"MOCK_TASK\",\"priority\":1,\"params\":{\"msg\":\"nor\"}}"
-echo ""
+echo "========== 2) NORMAL 任务 (priority=1) =========="
+RESP=$(submit smoke-nor-001 1); echo "$RESP"; NOR_ID=$(echo "$RESP" | extract_id)
 
-echo "========== 3) 幂等：重复提交同一 requestId =========="
-curl -s -X POST "$API/submit" -H "Content-Type: application/json" \
-  -d "{\"requestId\":\"$REQ_VIP\",\"taskType\":\"MOCK_TASK\",\"priority\":10,\"params\":{\"msg\":\"vip\"}}"
-echo ""
+echo "========== 3) 幂等：重复提交 smoke-vip-001 =========="
+submit smoke-vip-001 10; echo ""
 
-sleep 2
+echo "========== 4) 慢任务 slow-001 (转写3s / 质检2s) =========="
+RESP=$(submit slow-001 1); echo "$RESP"; SLOW_ID=$(echo "$RESP" | extract_id)
 
-# ---------- 引擎日志 ----------
-echo ""
-echo "========== 引擎关键日志（按时间顺序）=========="
-grep -E "任务已入队|入口桶已满|\[转写\]|\[质检\]|已死亡|停滞|ERROR" "$LOG" | tail -20
+echo "========== 5) 转写失败 fail-001 =========="
+RESP=$(submit fail-001 1); echo "$RESP"; FAIL_ID=$(echo "$RESP" | extract_id)
 
-# ---------- DB 状态 ----------
+echo "========== 6) 质检失败 qcfail-001 =========="
+RESP=$(submit qcfail-001 1); echo "$RESP"; QCFAIL_ID=$(echo "$RESP" | extract_id)
+
+# ---------------- 观测状态链 ----------------
 echo ""
-echo "========== DB 状态 =========="
-if [ -x "$MYSQL_BIN/mysql" ]; then
-  "$MYSQL_BIN/mysql" --default-character-set=utf8mb4 -u"$DB_USER" -p"$DB_PASS" -D "$DB_NAME" \
-    -e "SELECT id, request_id, status, priority FROM task WHERE request_id LIKE 'smoke-%' ORDER BY create_time;" 2>/dev/null
+echo "========== 7) 观测慢任务状态链（每 300ms 采样一次，只打印变化）=========="
+if [ -n "$SLOW_ID" ]; then
+  PREV=""
+  for i in $(seq 0 26); do
+    CODE=$(curl -s "$API/$SLOW_ID" | sed -n 's/.*"status":\([0-9]*\).*/\1/p')
+    if [ "${CODE:-}" != "$PREV" ]; then
+      printf "  t≈%sms  status=%s (%s)\n" "$((i * 300))" "${CODE:-?}" "$(status_name "${CODE:-}")"
+      PREV="${CODE:-}"
+    fi
+    sleep 0.3
+  done
 else
-  echo "(未找到 mysql 客户端，跳过 DB 校验)"
+  echo "  (未拿到 taskId，跳过)"
 fi
 
-# ---------- 收尾 ----------
+sleep 1
+
+# ---------------- 最终结果 ----------------
 echo ""
-echo "========== 停止应用 =========="
+echo "========== 8.1) 状态流转审计（slow-001 完整链路）=========="
+grep -F "状态流转" "$LOG" | head -20
+
+echo ""
+echo "========== 8.2) 引擎关键日志 =========="
+grep -E "任务已入队|入口桶已满|抢.*失败|转写失败|质检失败|任务完成|已死亡|疑似停滞|ERROR|WARN" "$LOG" | tail -25
+
+echo ""
+echo "========== 9) 最终状态 =========="
+mysql_q "SELECT request_id, priority, status, LEFT(COALESCE(fail_reason,''), 30) AS fail_reason, LEFT(COALESCE(result,''), 34) AS result
+         FROM task WHERE request_id LIKE 'smoke-%' OR request_id LIKE 'slow-%' OR request_id LIKE 'fail-%' OR request_id LIKE 'qcfail-%'
+         ORDER BY create_time;"
+
+echo ""
+echo "========== 10) 停止应用 =========="
 stop_app
 echo "✅ 完成。完整日志：$LOG"
