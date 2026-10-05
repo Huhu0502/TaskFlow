@@ -43,6 +43,21 @@ public class TaskController {
     }
 
     /**
+     * 重试一个「疑似丢失」的任务
+     *
+     * <p>幂等性由 service 里的 CAS 保证：并发点两次只会成功一次，
+     * 第二次会返回"任务状态刚刚发生变化"。
+     *
+     * @param id 任务 ID
+     */
+    @PostMapping("/{id}/retry")
+    public Result<Void> retry(@PathVariable("id") Long id) {
+        log.warn("用户请求重试任务, taskId={}", id);
+        taskService.retry(id);
+        return Result.ok();
+    }
+
+    /**
      * 分页查询任务
      * @param query
      * @return

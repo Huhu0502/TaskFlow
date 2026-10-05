@@ -29,4 +29,14 @@ public interface TaskService {
      * @return
      */
     PageResult<TaskListItemVO> queryPage(TaskPageQuery query);
+
+    /**
+     * 重试一个「疑似丢失」的任务 —— 产品层的可靠性兜底手段。
+     *
+     * <p>只在【长时间无进展 且 引擎并不繁忙】时才允许；
+     * 任务正常排队时会被拒绝，避免用户反复点重试把队列塞满重复任务。
+     *
+     * @param id 任务 ID
+     */
+    void retry(Long id);
 }

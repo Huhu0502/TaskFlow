@@ -1,5 +1,6 @@
 package com.taskflow.engine.local.engine;
 
+import com.taskflow.common.dispatch.EngineStatus;
 import com.taskflow.common.enums.TaskPriority;
 import com.taskflow.dao.mapper.TaskMapper;
 import com.taskflow.engine.local.config.PipelineProperties;
@@ -12,6 +13,8 @@ import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
+import java.time.LocalDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -53,10 +56,18 @@ import java.util.concurrent.CopyOnWriteArrayList;
  */
 @Slf4j
 @Component
-public class LocalPipelineEngine {
+public class LocalPipelineEngine implements EngineStatus {
 
     /** 搬运工在两个源桶都空时的阻塞等待时长（毫秒），避免空转 */
     private static final long TRANSFER_WAIT_MILLIS = 100L;
+
+    /**
+     * 「引擎繁忙」阈值：内存队列总使用率达到它就算繁忙。
+     *
+     * <p>队列很满时，任务"很久没动"是正常排队（而非丢失），所以此时不做"疑似丢失"判定——
+     * 这个条件正好把积压导致的误报滤掉。
+     */
+    private static final double BUSY_USAGE_RATIO = 0.5D;
 
     private final PipelineProperties props;
 
@@ -234,9 +245,27 @@ public class LocalPipelineEngine {
     }
 
     /** 内存队列总使用率 0~1（供「系统是否繁忙」判断与监控） */
+    @Override
     public double queueUsage() {
         int capacity = totalQueueCapacity();
         return capacity == 0 ? 0D : (double) totalQueueSize() / capacity;
+    }
+
+    /**
+     * 任务是否疑似丢失：<b>长时间无进展</b> 且 <b>引擎并不繁忙</b>。
+     *
+     * <p>只按时间判断是不够的：系统积压时任务在队列里正常排队同样会"很久没动"。
+     * 加上"引擎不繁忙"这个条件，就能把积压导致的误报滤掉。
+     */
+    @Override
+    public boolean isSuspectedLost(LocalDateTime lastUpdateTime) {
+        if (lastUpdateTime == null) {
+            return false;
+        }
+        long stuckSeconds = ChronoUnit.SECONDS.between(lastUpdateTime, LocalDateTime.now());
+        boolean stale = stuckSeconds >= props.getSuspectedLostStuckSeconds();
+        boolean notBusy = queueUsage() < BUSY_USAGE_RATIO;
+        return stale && notBusy;
     }
 
     /** 消费者数量（即「在途任务」的上限：每人手里最多 1 个） */

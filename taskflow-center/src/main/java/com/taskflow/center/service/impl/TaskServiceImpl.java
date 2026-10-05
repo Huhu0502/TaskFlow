@@ -15,6 +15,7 @@ import com.taskflow.dao.entity.Task;
 import com.taskflow.dao.mapper.TaskMapper;
 import com.taskflow.center.service.TaskService;
 import com.taskflow.center.vo.TaskDetailVO;
+import com.taskflow.common.dispatch.EngineStatus;
 import com.taskflow.common.dispatch.TaskDispatcher;
 import com.taskflow.common.enums.ResultCode;
 import com.taskflow.common.enums.TaskPriority;
@@ -27,6 +28,8 @@ import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
+import java.time.LocalDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Map;
 
@@ -40,10 +43,19 @@ public class TaskServiceImpl extends ServiceImpl<TaskMapper, Task> implements Ta
 
     private final TaskDispatcher taskDispatcher;
 
-    public TaskServiceImpl(ObjectMapper objectMapper, TaskConverter taskConverter, TaskDispatcher taskDispatcher) {
+    /** 引擎运行态视图（判断"是否繁忙 / 是否疑似丢失"），由引擎模块提供实现 */
+    private final EngineStatus engineStatus;
+
+    private final TaskMapper taskMapper;
+
+    public TaskServiceImpl(ObjectMapper objectMapper, TaskConverter taskConverter,
+                           TaskDispatcher taskDispatcher, EngineStatus engineStatus,
+                           TaskMapper taskMapper) {
         this.objectMapper = objectMapper;
         this.taskConverter = taskConverter;
         this.taskDispatcher = taskDispatcher;
+        this.engineStatus = engineStatus;
+        this.taskMapper = taskMapper;
     }
 
     @Override
@@ -96,7 +108,54 @@ public class TaskServiceImpl extends ServiceImpl<TaskMapper, Task> implements Ta
             throw new BizException(ResultCode.TASK_NOT_FOUND);
         }
         log.info("查询成功, taskId={}", id);
-        return taskConverter.toDetailVO(task);
+        TaskDetailVO vo = taskConverter.toDetailVO(task);
+        // 补充「运行态」信息：这两个字段不来自 DB，而是由引擎视图实时判断
+        vo.setStuckSeconds(stuckSeconds(task));
+        vo.setSuspectedLost(!TaskStatus.isTerminal(task.getStatus())
+                && engineStatus.isSuspectedLost(task.getUpdateTime()));
+        return vo;
+    }
+
+    @Override
+    public void retry(Long taskId) {
+        Task task = this.getById(taskId);
+        if (task == null) {
+            throw new BizException(ResultCode.TASK_NOT_FOUND);
+        }
+
+        int currentStatus = task.getStatus();
+        if (TaskStatus.isTerminal(currentStatus)) {
+            throw new BizException(ResultCode.TASK_ALREADY_FINISHED);
+        }
+
+        // ⭐ 关键门槛：只有"疑似丢失"才允许重试。
+        //    若任务只是在正常排队，用户反复点重试会把队列塞满重复任务（越忙越乱）。
+        if (!engineStatus.isSuspectedLost(task.getUpdateTime())) {
+            throw new BizException(ResultCode.TASK_STILL_QUEUEING);
+        }
+
+        // 用 CAS 重置为 CREATED，再走与首次提交完全相同的分发路径（复用同一套投递逻辑）
+        int reset = taskMapper.casStatus(taskId, currentStatus, TaskStatus.CREATED.getCode());
+        if (reset == 0) {
+            // 并发场景：状态刚被其他流程改走（worker 已抢走 / 已完成 / 已被重试过）
+            throw new BizException(ResultCode.TASK_RETRY_CONFLICT);
+        }
+
+        taskDispatcher.dispatch(taskId, task.getTaskType(), priorityOf(task));
+        log.warn("用户重试任务, taskId={}, 原状态={}, 已重置为 CREATED 并重新分发",
+                taskId, TaskStatus.of(currentStatus));
+    }
+
+    /** 距上次状态变更的秒数（负数表示时钟回拨，归零处理） */
+    private long stuckSeconds(Task task) {
+        if (task.getUpdateTime() == null) {
+            return 0L;
+        }
+        return Math.max(0L, ChronoUnit.SECONDS.between(task.getUpdateTime(), LocalDateTime.now()));
+    }
+
+    private int priorityOf(Task task) {
+        return task.getPriority() == null ? TaskPriority.NORMAL.getCode() : task.getPriority();
     }
 
     @Override
