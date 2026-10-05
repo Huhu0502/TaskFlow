@@ -29,7 +29,9 @@ DB_USER=root
 DB_PASS=jinjian20010210
 DB_NAME=taskflow
 
-COMP_ID=8800000000000000001        # 直接 INSERT 的补偿测试任务 id（必须 < bigint 上限 9223372036854775807）
+COMP_ID=8800000000000000001        # 补偿测试任务 id（必须 < bigint 上限 9223372036854775807）
+LOST_BASE=8800000000000000002       # 模拟「在途丢失」的 6 条任务 id 起始值（8800...002 ~ 007）
+LOST_COUNT=6                        # 数量对账是「量级」检测：必须超过容忍值（默认 5）才能真正判定丢失
 FAIL=0
 
 if [ ! -f "$JAR" ]; then
@@ -82,7 +84,7 @@ start_app() {   # $@ = 额外启动参数
   tail -n +$((mark + 1)) "$LOG" | grep -q "Started TaskFlowCenterApplication" || return 1
 
   for i in $(seq 1 30); do
-    tail -n +$((mark + 1)) "$LOG" | grep -qE "启动恢复完成" && return 0
+    tail -n +$((mark + 1)) "$LOG" | grep -qE "引擎重建完成" && return 0
     sleep 1
   done
   return 1
@@ -190,10 +192,80 @@ else
 fi
 
 echo ""
-echo "  启动恢复日志："
-grep -E "启动恢复" "$LOG" | tail -3 | sed 's/^/    /'
+echo "  重建日志："
+grep -E "引擎重建" "$LOG" | tail -3 | sed 's/^/    /'
 echo "  该任务的状态流转轨迹（应能看到两次 QUEUED -> TRANSCRIBING）："
 grep -F "taskId=$SLOW_ID" "$LOG" | grep -F "状态流转" | sed 's/^/    /'
+
+# ============================================================
+# 【3】低峰期定时重建 + 重建前对账
+# ============================================================
+echo ""
+echo "############ 【3】低峰期定时重建 + 对账 ############"
+
+stop_app
+echo "重启应用（rebuild-cron = 每 15 秒触发一次，便于验证）"
+if ! start_app --taskflow.pipeline.created-stuck-seconds=1 \
+               --taskflow.pipeline.transcribed-stuck-seconds=1 \
+               --taskflow.pipeline.compensate-interval-millis=2000 \
+               --taskflow.pipeline.rebuild-cron="0/15 * * * * ?"; then
+  echo "❌ 启动失败"; tail -20 "$LOG"; stop_app; exit 1
+fi
+echo "✅ 应用已启动"
+
+echo ""
+echo "--- 3.1 模拟「运行中在途丢失」：INSERT $LOST_COUNT 条 status=QUEUED，但它们不在任何内存队列里 ---"
+VALUES=""
+for k in $(seq 0 $((LOST_COUNT - 1))); do
+  VALUES="$VALUES,
+     ($((LOST_BASE + k)), 'comp-lost-00$k', NULL, 'MOCK_TASK', '{\"msg\":\"lost$k\"}',
+      1, 1, 0, 3, NOW(), NOW(), 0)"
+done
+VALUES="${VALUES#,}"
+"$MYSQL_BIN" --default-character-set=utf8mb4 -u"$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -e \
+  "INSERT INTO task (id, request_id, batch_id, task_type, params, status, priority,
+                     retry_count, max_retry, create_time, update_time, deleted)
+   VALUES $VALUES;" 2>&1 | grep -v "Using a password"
+
+INSERTED=$(mysql_q "SELECT COUNT(*) FROM task WHERE id BETWEEN $LOST_BASE AND $((LOST_BASE + LOST_COUNT - 1));")
+if [ "${INSERTED:-0}" != "$LOST_COUNT" ]; then
+  echo "❌ INSERT 未生效（实际 $INSERTED 条），测试无法继续"
+  stop_app
+  exit 1
+fi
+echo "已插入 $LOST_COUNT 条 taskId=$LOST_BASE ~ $((LOST_BASE + LOST_COUNT - 1))，status=QUEUED"
+echo "    ↑ DB 说它们在排队，但内存里根本没有 —— 这正是「在途丢失」的形态"
+echo "    ↑ 补偿扫描【刻意不扫 QUEUED】，所以只能靠低峰重建救它们"
+
+echo ""
+echo "--- 3.2 等下一次低峰重建（最多 30s）---"
+DONE=0
+for i in $(seq 1 30); do
+  DONE=$(mysql_q "SELECT COUNT(*) FROM task WHERE id BETWEEN $LOST_BASE AND $((LOST_BASE + LOST_COUNT - 1)) AND status = 5;")
+  printf "  t=%ss 已完成 %s/%s\n" "$i" "${DONE:-0}" "$LOST_COUNT"
+  [ "${DONE:-0}" = "$LOST_COUNT" ] && break
+  sleep 1
+done
+
+if [ "${DONE:-0}" = "$LOST_COUNT" ]; then
+  echo "✅ 【3】低峰重建生效：$LOST_COUNT 条在途丢失的任务被重建并全部执行到 SUCCESS"
+else
+  echo "❌ 【3】低峰重建失败：仅 ${DONE:-0}/$LOST_COUNT 条完成"
+  FAIL=1
+fi
+
+echo ""
+echo "  对账日志（重建前；应能看见⚠️异常告警）："
+grep -E "对账" "$LOG" | tail -3 | sed 's/^/    /'
+echo "  重建日志："
+grep -E "引擎重建" "$LOG" | tail -4 | sed 's/^/    /'
+
+if grep -q "对账异常" "$LOG"; then
+  echo "✅ 【3】对账生效：识别出了数量级丢失（这是唯一能留下“确实丢过”证据的手段）"
+else
+  echo "❌ 【3】对账未告警，请检查容忍值/扫描逻辑"
+  FAIL=1
+fi
 
 echo ""
 echo "========== 停止应用 =========="
