@@ -6,11 +6,13 @@ import lombok.Getter;
 public enum TaskStatus {
     CREATED(0, "创建成功等待入队"),
     QUEUED(1, "已经入队，待处理"),
-    RUNNING(2, "执行中"),
-    SUCCESS(3, "成功"),
-    FAILED(4, "失败"),
-    TIMEOUT(5, "超时"),
-    CANCELED(6, "已取消");
+    TRANSCRIBING(2, "转写中"),
+    TRANSCRIBED(3, "转写完成待质检"),
+    QC_ING(4, "质检中"),
+    SUCCESS(5, "成功"),
+    FAILED(6, "失败"),
+    TIMEOUT(7, "超时"),
+    CANCELED(8, "已取消");
 
     private final int code;
 
@@ -30,4 +32,11 @@ public enum TaskStatus {
         return null;
     }
 
+    public static boolean isTerminal(int code) {
+        return code == SUCCESS.getCode() || code == FAILED.getCode() || code == CANCELED.getCode() || code == TIMEOUT.getCode();
+    }
+
+    public static boolean isStageRunning(int code) {
+        return code == TRANSCRIBING.getCode() || code == QC_ING.getCode();
+    }
 }

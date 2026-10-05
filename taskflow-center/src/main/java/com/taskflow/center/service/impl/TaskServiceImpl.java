@@ -16,6 +16,7 @@ import com.taskflow.dao.mapper.TaskMapper;
 import com.taskflow.center.service.TaskService;
 import com.taskflow.center.vo.TaskDetailVO;
 import com.taskflow.common.enums.ResultCode;
+import com.taskflow.common.enums.TaskPriority;
 import com.taskflow.common.enums.TaskStatus;
 import com.taskflow.common.enums.TaskType;
 import com.taskflow.common.exception.BizException;
@@ -61,7 +62,7 @@ public class TaskServiceImpl extends ServiceImpl<TaskMapper, Task> implements Ta
         task.setTaskType(request.getTaskType());
         task.setParams(paramsJson);
         task.setStatus(TaskStatus.CREATED.getCode());
-        task.setPriority(request.getPriority()==null ? 0 : request.getPriority());
+        task.setPriority(request.getPriority() == null ? TaskPriority.NORMAL.getCode() : request.getPriority());
         task.setMaxRetry(request.getMaxRetry()==null ? 0 : request.getMaxRetry());
         task.setRetryCount(0);
 
