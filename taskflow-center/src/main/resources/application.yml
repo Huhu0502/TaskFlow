@@ -17,3 +17,14 @@ mybatis-plus:
       logic-delete-field: deleted
       logic-delete-value: 1
       logic-not-delete-value: 0
+
+# ============================================================
+# 任务执行引擎
+# ============================================================
+taskflow:
+  # local = 内存多级流水线引擎（默认）；后续可切 mq
+  engine: local
+  pipeline:
+    # 骨架自测：启动时灌入 5 个假任务验证队列流转
+    # ⚠️ 阶段 3 接入真实转写/质检后请改为 false
+    self-test: true

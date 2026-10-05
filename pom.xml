@@ -16,6 +16,7 @@
     <modules>
         <module>taskflow-common</module>
         <module>taskflow-dao</module>
+        <module>taskflow-engine-local</module>
         <module>taskflow-center</module>
     </modules>
 
