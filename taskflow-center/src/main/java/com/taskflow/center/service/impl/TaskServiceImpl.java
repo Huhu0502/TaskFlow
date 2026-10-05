@@ -15,6 +15,7 @@ import com.taskflow.dao.entity.Task;
 import com.taskflow.dao.mapper.TaskMapper;
 import com.taskflow.center.service.TaskService;
 import com.taskflow.center.vo.TaskDetailVO;
+import com.taskflow.common.dispatch.TaskDispatcher;
 import com.taskflow.common.enums.ResultCode;
 import com.taskflow.common.enums.TaskPriority;
 import com.taskflow.common.enums.TaskStatus;
@@ -37,9 +38,12 @@ public class TaskServiceImpl extends ServiceImpl<TaskMapper, Task> implements Ta
 
     private final TaskConverter taskConverter;
 
-    public TaskServiceImpl(ObjectMapper objectMapper, TaskConverter taskConverter) {
+    private final TaskDispatcher taskDispatcher;
+
+    public TaskServiceImpl(ObjectMapper objectMapper, TaskConverter taskConverter, TaskDispatcher taskDispatcher) {
         this.objectMapper = objectMapper;
         this.taskConverter = taskConverter;
+        this.taskDispatcher = taskDispatcher;
     }
 
     @Override
@@ -75,6 +79,12 @@ public class TaskServiceImpl extends ServiceImpl<TaskMapper, Task> implements Ta
             return new TaskSubmitResponse(dup.getId(), dup.getStatus(), true);
         }
         log.info("任务创建成功, taskId={}, requestId={}", task.getId(), task.getRequestId());
+
+        // ⭐ 分发必须在【落库之后】调用。submit() 未加 @Transactional（save 立即提交），
+        //    所以此处已经是"事务后"，不会产生"事务回滚但队列里已有任务"的幽灵任务。
+        //    dispatch 是【非阻塞】的：桶满只记 WARN，任务保持 CREATED 交给补偿扫描。
+        taskDispatcher.dispatch(task.getId(), task.getTaskType(), task.getPriority());
+
         return new TaskSubmitResponse(task.getId(), task.getStatus(), false);
     }
 
