@@ -29,4 +29,24 @@ public interface TaskMapper extends BaseMapper<Task> {
     int casStatus(@Param("id") Long id,
                   @Param("fromStatus") int fromStatus,
                   @Param("toStatus") int toStatus);
+
+    /**
+     * 带结果的收尾 CAS：阶段执行完毕时一次性推进状态并落结果。
+     *
+     * <p>{@code result} / {@code failReason} 为 null 时<b>不写该字段</b>，
+     * 避免"写失败原因时把已有的转写结果擦掉"。
+     *
+     * @return 影响行数（1 = 成功收尾，0 = 状态已被其他流程改走，本次结果作废）
+     */
+    @Update("<script>"
+            + "UPDATE task SET status = #{toStatus}, update_time = NOW()"
+            + "<if test='result != null'>, result = #{result}</if>"
+            + "<if test='failReason != null'>, fail_reason = #{failReason}</if>"
+            + " WHERE id = #{id} AND status = #{fromStatus} AND deleted = 0"
+            + "</script>")
+    int casFinish(@Param("id") Long id,
+                  @Param("fromStatus") int fromStatus,
+                  @Param("toStatus") int toStatus,
+                  @Param("result") String result,
+                  @Param("failReason") String failReason);
 }

@@ -24,7 +24,3 @@ mybatis-plus:
 taskflow:
   # local = 内存多级流水线引擎（默认）；后续可切 mq
   engine: local
-  pipeline:
-    # 骨架自测：启动时灌入 5 个假 taskId（DB 里不存在）验证队列流转
-    # ⚠️ 已接入真实提交链路，必须保持 false——否则假 taskId 会让真实 handler 查库失败
-    self-test: false

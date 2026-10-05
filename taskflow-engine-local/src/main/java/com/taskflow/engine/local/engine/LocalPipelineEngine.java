@@ -1,9 +1,12 @@
 package com.taskflow.engine.local.engine;
 
 import com.taskflow.common.enums.TaskPriority;
+import com.taskflow.dao.mapper.TaskMapper;
 import com.taskflow.engine.local.config.PipelineProperties;
 import com.taskflow.engine.local.consumer.ManagedConsumer;
 import com.taskflow.engine.local.queue.BoundedTaskQueue;
+import com.taskflow.engine.local.stage.QcStage;
+import com.taskflow.engine.local.stage.TranscribeStage;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
@@ -25,7 +28,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
  *                        ▼
  *                 transcribeQueue（小 FIFO）
  *                        │
- *                  转写 worker × N
+ *                  转写 worker × N   ──CAS QUEUED→TRANSCRIBING→TRANSCRIBED──▶ 存 result
  *                        │ offer
  *                        ▼
  *                 bufferVip / bufferNormal            （质检入口层）
@@ -35,7 +38,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
  *                        ▼
  *                    qcQueue（小 FIFO）
  *                        │
- *                  质检 worker × N
+ *                  质检 worker × N   ──CAS TRANSCRIBED→QC_ING→SUCCESS/FAILED
  * </pre>
  *
  * <p><b>设计要点</b>：
@@ -44,7 +47,8 @@ import java.util.concurrent.CopyOnWriteArrayList;
  *   <li>优先级桶的消费者只有搬运工（单线程），所以「按配额取」天然精确、无需加锁；</li>
  *   <li>worker 只面对一个 FIFO 工作队列，不需要懂优先级；</li>
  *   <li>搬运工「填工作队列的顺序」就是「执行顺序」；</li>
- *   <li>HTTP 线程只 {@code offer}（绝不阻塞），阻塞式 {@code put} 只出现在搬运工线程里。</li>
+ *   <li>HTTP 线程只 {@code offer}（绝不阻塞），阻塞式 {@code put} 只出现在搬运工线程里；</li>
+ *   <li>状态推进一律走 CAS，所以「重复投递 / 重复消费」永远不会导致重复执行。</li>
  * </ul>
  */
 @Slf4j
@@ -73,9 +77,16 @@ public class LocalPipelineEngine {
     /** 全部消费者 */
     private final List<ManagedConsumer> consumers = new CopyOnWriteArrayList<>();
 
-    public LocalPipelineEngine(PipelineProperties props) {
+    // ---------------- 阶段 ----------------
+
+    private final TranscribeStage transcribeStage;
+
+    private final QcStage qcStage;
+
+    public LocalPipelineEngine(PipelineProperties props, TaskMapper taskMapper) {
         this.props = props;
 
+        // ① 队列（必须在创建 Stage 之前完成，因为 Stage 的回调会用到这些队列）
         this.pendingVip = new BoundedTaskQueue("pendingVip", props.getPendingVipCapacity());
         this.pendingNormal = new BoundedTaskQueue("pendingNormal", props.getPendingNormalCapacity());
 
@@ -92,6 +103,10 @@ public class LocalPipelineEngine {
                 bufferVip, bufferNormal,
                 qcQueue);
         this.allQueues = Collections.unmodifiableList(queues);
+
+        // ② 阶段：转写阶段通过回调交接给质检入口层，避免与引擎互相依赖
+        this.transcribeStage = new TranscribeStage(taskMapper, this::enqueueForQc);
+        this.qcStage = new QcStage(taskMapper);
     }
 
     // ================================================================
@@ -103,11 +118,11 @@ public class LocalPipelineEngine {
         log.info("本地引擎启动中（队列: {} {} {} {} {} {}）",
                 pendingVip, pendingNormal, transcribeQueue, bufferVip, bufferNormal, qcQueue);
 
-        // 转写 worker：从工作队列取 → 处理
+        // 转写 worker：从工作队列取 → 交给转写阶段
         for (int i = 1; i <= props.getTranscribeThreads(); i++) {
             addConsumer(new ManagedConsumer("transcribe-worker-" + i,
                     transcribeQueue::takeOrNull,
-                    this::handleTranscribe)
+                    transcribeStage::handle)
                     .watching(transcribeQueue::size));
         }
 
@@ -115,7 +130,7 @@ public class LocalPipelineEngine {
         for (int i = 1; i <= props.getQcThreads(); i++) {
             addConsumer(new ManagedConsumer("qc-worker-" + i,
                     qcQueue::takeOrNull,
-                    this::handleQc)
+                    qcStage::handle)
                     .watching(qcQueue::size));
         }
 
@@ -130,10 +145,6 @@ public class LocalPipelineEngine {
                 .watching(() -> bufferVip.size() + bufferNormal.size()));
 
         log.info("本地引擎已启动，消费者 {} 个：{}", consumers.size(), consumerNames());
-
-        if (props.isSelfTest()) {
-            runSelfTest();
-        }
     }
 
     @PreDestroy
@@ -150,7 +161,7 @@ public class LocalPipelineEngine {
     /**
      * 提交任务进入流水线（<b>非阻塞</b>，给 HTTP 线程用）。
      *
-     * @return true = 已入队；false = 桶已满，任务保持 CREATED，交给补偿扫描兜底
+     * @return true = 已入队；false = 桶已满，调用方应让任务保持 CREATED，交给补偿扫描兜底
      */
     public boolean submit(Long taskId, int priority) {
         return route(taskId, priority, pendingVip, pendingNormal);
@@ -165,7 +176,7 @@ public class LocalPipelineEngine {
         return route(taskId, priority, bufferVip, bufferNormal);
     }
 
-    /** 所有队列（只读），供监控/重建使用 */
+    /** 所有队列（只读），供监控 / 重建使用 */
     public List<BoundedTaskQueue> queues() {
         return allQueues;
     }
@@ -185,7 +196,7 @@ public class LocalPipelineEngine {
     }
 
     // ================================================================
-    // 内部：路由 / 搬运 / 业务占位
+    // 内部：路由 / 搬运
     // ================================================================
 
     private boolean route(Long taskId, int priority, BoundedTaskQueue vip, BoundedTaskQueue normal) {
@@ -252,38 +263,6 @@ public class LocalPipelineEngine {
         return true;
     }
 
-    /**
-     * 转写阶段（阶段 1 占位实现）。
-     *
-     * <p>阶段 3 会替换成：CAS 状态 QUEUED → TRANSCRIBING → 执行转写 → 保存结果
-     * → CAS 状态 → TRANSCRIBED → {@link #enqueueForQc}。
-     */
-    private void handleTranscribe(Long taskId) {
-        log.info("[转写] 处理任务 {}", taskId);
-        sleepQuietly(200L);
-        if (!enqueueForQc(taskId, TaskPriority.NORMAL.getCode())) {
-            log.warn("质检入口桶已满，任务 {} 保持待投递，交给补偿扫描", taskId);
-        }
-    }
-
-    /**
-     * 质检阶段（阶段 1 占位实现）。
-     *
-     * <p>阶段 3 会替换成：CAS TRANSCRIBED → QC_ING → 执行质检 → CAS → SUCCESS / FAILED。
-     */
-    private void handleQc(Long taskId) {
-        log.info("[质检] 处理任务 {}", taskId);
-        sleepQuietly(50L);
-    }
-
-    private void sleepQuietly(long millis) {
-        try {
-            Thread.sleep(millis);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-    }
-
     private String consumerNames() {
         StringBuilder sb = new StringBuilder();
         for (ManagedConsumer c : consumers) {
@@ -293,16 +272,5 @@ public class LocalPipelineEngine {
             sb.append(c.getName());
         }
         return sb.toString();
-    }
-
-    /** 骨架自测：灌入假任务，观察日志里的完整流转链路 */
-    private void runSelfTest() {
-        log.info("=========== 自测开始：灌入 5 个假任务 ===========");
-        for (long i = 1; i <= 3; i++) {
-            submit(1000L + i, TaskPriority.NORMAL.getCode());
-        }
-        submit(2001L, TaskPriority.VIP.getCode());
-        submit(2002L, TaskPriority.VIP.getCode());
-        log.info("自测：已灌入 3 个 NORMAL（1001~1003）+ 2 个 VIP（2001~2002）");
     }
 }

@@ -59,13 +59,4 @@ public class PipelineProperties {
 
     /** 队列深度告警阈值（使用率 0~1） */
     private double queueWarnRatio = 0.8;
-
-    // ---------------- 自测 ----------------
-
-    /**
-     * 骨架自测：启动时灌入若干假任务，验证「入口桶 → 搬运工 → 工作队列 → worker」的流转。
-     *
-     * <p>⚠️ 仅在阶段 1（业务逻辑未接入）时开启；接入真实转写/质检后请务必关闭。
-     */
-    private boolean selfTest = false;
 }
