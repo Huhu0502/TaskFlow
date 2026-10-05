@@ -39,27 +39,29 @@ public class LocalTaskDispatcher implements TaskDispatcher {
     }
 
     @Override
-    public void dispatch(Long taskId, String taskType, int priority) {
+    public boolean dispatch(Long taskId, String taskType, int priority) {
         // ① 先占状态：CREATED -> QUEUED
         //    CAS 返回 0 说明已被其他流程改走（如已被取消），直接放弃分发。
         int claimed = taskMapper.casStatus(taskId,
                 TaskStatus.CREATED.getCode(), TaskStatus.QUEUED.getCode());
         if (claimed == 0) {
             log.debug("任务 {} 状态推进失败（已被其他流程改走），跳过分发", taskId);
-            return;
+            return false;
         }
 
         // ② 非阻塞入队（offer）：桶满只返回 false，绝不阻塞 HTTP 线程
         if (engine.submit(taskId, priority)) {
             log.info("任务已入队, taskId={}, taskType={}, priority={}", taskId, taskType, priority);
-            return;
+            return true;
         }
 
         // ③ 桶满 → 回退状态，保持「QUEUED ⇔ 已在内存队列里」这个不变量，
         //    任务回到 CREATED 后由补偿扫描下一轮再投递。
+        //    注意：CAS 会刷新 update_time，天然避免补偿任务热循环。
         int rolledBack = taskMapper.casStatus(taskId,
                 TaskStatus.QUEUED.getCode(), TaskStatus.CREATED.getCode());
         log.warn("入口桶已满，任务 {} 已回退为 CREATED（回退={}），等待补偿投递",
                 taskId, rolledBack == 1 ? "成功" : "跳过(状态已被worker改走)");
+        return false;
     }
 }

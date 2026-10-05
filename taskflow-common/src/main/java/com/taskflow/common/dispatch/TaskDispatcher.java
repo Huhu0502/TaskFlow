@@ -24,6 +24,7 @@ public interface TaskDispatcher {
      * @param taskId   任务 ID
      * @param taskType 任务类型（用于路由到对应队列）
      * @param priority 任务优先级（数值越大越优先，用于路由到对应的优先级桶）
+     * @return true = 已成功投递；false = 队列已满或状态被其他流程改走，任务保持原状态交由补偿扫描兜底
      */
-    void dispatch(Long taskId, String taskType, int priority);
+    boolean dispatch(Long taskId, String taskType, int priority);
 }

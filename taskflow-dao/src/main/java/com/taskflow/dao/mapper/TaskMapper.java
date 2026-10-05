@@ -49,4 +49,14 @@ public interface TaskMapper extends BaseMapper<Task> {
                   @Param("toStatus") int toStatus,
                   @Param("result") String result,
                   @Param("failReason") String failReason);
+
+    /**
+     * 只刷新 {@code update_time}（心跳）。
+     *
+     * <p>用于「已经做了动作但状态不变」的场景：补偿扫描把 TRANSCRIBED 任务重新投进质检入口桶后，
+     * 状态仍是 TRANSCRIBED，若不刷新 {@code update_time}，下一轮补偿会把同一条又扫出来重复投递。
+     * 补偿扫描以 {@code update_time} 为「停滞时长」依据，所以这里充当去重闸门。
+     */
+    @Update("UPDATE task SET update_time = NOW() WHERE id = #{id} AND deleted = 0")
+    int touch(@Param("id") Long id);
 }

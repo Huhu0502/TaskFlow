@@ -59,4 +59,27 @@ public class PipelineProperties {
 
     /** 队列深度告警阈值（使用率 0~1） */
     private double queueWarnRatio = 0.8;
+
+    // ---------------- 启动恢复 / 补偿扫描 ----------------
+
+    /** 启动恢复单批扫描条数（分批避免一次拉全表） */
+    private int recoveryBatchSize = 1000;
+
+    /** 补偿扫描单批条数 */
+    private int compensateBatchSize = 500;
+
+    /**
+     * CREATED 停留超过多少秒视为异常（offer 失败 / 进程在 CAS 后中断）→ 重新投递。
+     *
+     * <p>CREATED 的判断<b>没有歧义</b>：它只可能在「未入队」或「入队失败」状态。
+     */
+    private long createdStuckSeconds = 30;
+
+    /**
+     * TRANSCRIBED 停留超过多少秒视为异常（投质检入口桶失败）→ 重新投递。
+     *
+     * <p>注意：<b>不扫 QUEUED</b>——它分不清「正常排队」和「丢失」，
+     * 扫了会在积压时误判并把队列塞满重复任务。QUEUED 只在启动恢复时全量重建。
+     */
+    private long transcribedStuckSeconds = 60;
 }
