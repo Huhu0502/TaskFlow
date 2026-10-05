@@ -9,8 +9,6 @@ import com.taskflow.dao.mapper.TaskMapper;
 import com.taskflow.engine.local.config.PipelineProperties;
 import com.taskflow.engine.local.engine.LocalPipelineEngine;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.boot.ApplicationArguments;
-import org.springframework.boot.ApplicationRunner;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
@@ -33,12 +31,13 @@ import java.util.List;
  *
  * <p>重复投递天然安全：每个阶段的第一步都是 CAS 抢任务，抢不到的直接放弃。
  *
- * <p>同一段逻辑可被「低峰期定时重建」复用（见 {@code rebuild()}），
- * 用来兜住"运行中在途丢失"这种极小概率情况。
+ * <p>本类只负责「从 DB 重读并重投」这一步；完整的引擎重建
+ * （停消费者 → 清空队列 → 重建 → 起消费者）由 {@code EngineRebuilder} 编排，
+ * 启动时与低峰期定时共用同一条路径。
  */
 @Slf4j
 @Component
-public class PipelineRecovery implements ApplicationRunner {
+public class PipelineRecovery {
 
     /** 需要重建的非终态（终态任务不再处理） */
     private static final List<Integer> RECOVERABLE = List.of(
@@ -66,13 +65,12 @@ public class PipelineRecovery implements ApplicationRunner {
         this.props = props;
     }
 
-    @Override
-    public void run(ApplicationArguments args) {
-        rebuild();
-    }
-
-    /** 全量重建内存队列（启动时调用；也可由低峰期定时任务复用） */
-    public void rebuild() {
+    /**
+     * 从 DB 重读所有非终态任务并重新投递。
+     *
+     * @return 成功重投的条数（调用方用于日志与告警）
+     */
+    public int rebuild() {
         long startAt = System.currentTimeMillis();
         int scanned = 0;
         int redispatched = 0;
@@ -101,11 +99,12 @@ public class PipelineRecovery implements ApplicationRunner {
         }
 
         if (scanned == 0) {
-            log.info("启动恢复完成：无待恢复任务");
+            log.info("重建扫描完成：无待重建任务");
         } else {
-            log.warn("启动恢复完成：扫描 {} 条非终态任务，重投 {} 条，跳过 {} 条，耗时 {}ms",
+            log.warn("重建扫描完成：扫描 {} 条非终态任务，重投 {} 条，跳过 {} 条，耗时 {}ms",
                     scanned, redispatched, skipped, System.currentTimeMillis() - startAt);
         }
+        return redispatched;
     }
 
     private boolean recoverOne(Task task) {

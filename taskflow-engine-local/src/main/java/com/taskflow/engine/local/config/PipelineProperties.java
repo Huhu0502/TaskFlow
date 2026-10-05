@@ -82,4 +82,15 @@ public class PipelineProperties {
      * 扫了会在积压时误判并把队列塞满重复任务。QUEUED 只在启动恢复时全量重建。
      */
     private long transcribedStuckSeconds = 60;
+
+    // ---------------- 低峰期全量重建 ----------------
+
+    /** 低峰期重建的 cron（默认每天 03:00；填 "-" 可关闭） */
+    private String rebuildCron = "0 0 3 * * ?";
+
+    /** 「疑似丢失」判定：任务停留在当前状态超过多少秒算「长时间无进展」（默认 30 分钟） */
+    private long suspectedLostStuckSeconds = 1800;
+
+    /** 数量对账的容忍值（覆盖在途任务与时序余量） */
+    private int reconcileTolerance = 5;
 }

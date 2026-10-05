@@ -77,6 +77,9 @@ public class LocalPipelineEngine {
     /** 全部消费者 */
     private final List<ManagedConsumer> consumers = new CopyOnWriteArrayList<>();
 
+    /** 消费者是否已创建（创建一次即可，之后由 pause/resume 控制启停） */
+    private boolean consumersCreated = false;
+
     // ---------------- 阶段 ----------------
 
     private final TranscribeStage transcribeStage;
@@ -118,6 +121,25 @@ public class LocalPipelineEngine {
         log.info("本地引擎启动中（队列: {} {} {} {} {} {}）",
                 pendingVip, pendingNormal, transcribeQueue, bufferVip, bufferNormal, qcQueue);
 
+        createConsumers();
+        resume();
+
+        log.info("本地引擎已启动，消费者 {} 个：{}", consumers.size(), consumerNames());
+    }
+
+    @PreDestroy
+    public void stop() {
+        log.info("本地引擎停止中...");
+        pause();
+        log.info("本地引擎已停止");
+    }
+
+    /** 创建全部消费者（只执行一次；启停由 {@link #pause()} / {@link #resume()} 控制） */
+    private synchronized void createConsumers() {
+        if (consumersCreated) {
+            return;
+        }
+
         // 转写 worker：从工作队列取 → 交给转写阶段
         for (int i = 1; i <= props.getTranscribeThreads(); i++) {
             addConsumer(new ManagedConsumer("transcribe-worker-" + i,
@@ -144,14 +166,21 @@ public class LocalPipelineEngine {
                 self -> transferLoop(self, bufferVip, bufferNormal, qcQueue))
                 .watching(() -> bufferVip.size() + bufferNormal.size()));
 
-        log.info("本地引擎已启动，消费者 {} 个：{}", consumers.size(), consumerNames());
+        consumersCreated = true;
     }
 
-    @PreDestroy
-    public void stop() {
-        log.info("本地引擎停止中...");
+    /**
+     * 暂停全部消费者：中断 + 等待退出。
+     *
+     * <p>用于「引擎重建」：必须先停掉消费者，才能安全地清空队列、从 DB 重建。
+     */
+    public void pause() {
         consumers.forEach(c -> c.interruptAndJoin(3000L));
-        log.info("本地引擎已停止");
+    }
+
+    /** 恢复全部消费者（幂等：已在跑的不会被重复启动） */
+    public void resume() {
+        consumers.forEach(ManagedConsumer::start);
     }
 
     // ================================================================
@@ -195,6 +224,38 @@ public class LocalPipelineEngine {
         return total;
     }
 
+    /** 全部队列容量之和 */
+    public int totalQueueCapacity() {
+        int total = 0;
+        for (BoundedTaskQueue q : allQueues) {
+            total += q.capacity();
+        }
+        return total;
+    }
+
+    /** 内存队列总使用率 0~1（供「系统是否繁忙」判断与监控） */
+    public double queueUsage() {
+        int capacity = totalQueueCapacity();
+        return capacity == 0 ? 0D : (double) totalQueueSize() / capacity;
+    }
+
+    /** 消费者数量（即「在途任务」的上限：每人手里最多 1 个） */
+    public int consumerCount() {
+        return consumers.size();
+    }
+
+    /**
+     * 清空全部内存队列，返回被清掉的 taskId 数量。
+     *
+     * <p>队列元素只是 taskId，DB 才是事实来源，所以清空不会丢数据 ——
+     * 重建时会从 DB 重新投递回来。仅供「引擎重建」使用。
+     */
+    public int clearAllQueues() {
+        int cleared = totalQueueSize();
+        allQueues.forEach(BoundedTaskQueue::clear);
+        return cleared;
+    }
+
     // ================================================================
     // 内部：路由 / 搬运
     // ================================================================
@@ -205,7 +266,6 @@ public class LocalPipelineEngine {
 
     private void addConsumer(ManagedConsumer consumer) {
         consumers.add(consumer);
-        consumer.start();
     }
 
     /**

@@ -3,6 +3,7 @@ package com.taskflow.dao.mapper;
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import com.taskflow.dao.entity.Task;
 import org.apache.ibatis.annotations.Param;
+import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
 
 public interface TaskMapper extends BaseMapper<Task> {
@@ -59,4 +60,15 @@ public interface TaskMapper extends BaseMapper<Task> {
      */
     @Update("UPDATE task SET update_time = NOW() WHERE id = #{id} AND deleted = 0")
     int touch(@Param("id") Long id);
+
+    /**
+     * 按状态计数。
+     *
+     * <p>用于「数量对账」：DB 里 {@code QUEUED} 的数量不应超过「内存队列元素总数 + 在途任务上限」。
+     * 超出就说明一定有任务丢了。
+     *
+     * <p>属于全索引扫描，只应在低频场景（重建前对账）调用，不要放到热路径。
+     */
+    @Select("SELECT COUNT(*) FROM task WHERE status = #{status} AND deleted = 0")
+    long countByStatus(@Param("status") int status);
 }
